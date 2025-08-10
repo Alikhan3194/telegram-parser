@@ -8,3 +8,13 @@ HEADERS = {
 }
 
 BASE_URL = "https://telemetr.me" 
+LIMITS_URL = f"{BASE_URL}/profile"
+
+# Telemetr official API configuration
+import os
+TELEMETR_API_BASE = "https://api.telemetr.me"
+TELEMETR_API_TOKEN = os.getenv("erySdBXrEPe87pArC4HJdyZZyxIxGLschh9eZhOL1ni8msF9YBsyDWJ2OMDKsq8DxUNFAyJQxV52B") or ""
+API_HEADERS = {
+    "Authorization": f"Bearer {TELEMETR_API_TOKEN}",
+    "Accept": "application/json",
+}

@@ -5,13 +5,24 @@ from pathlib import Path
 import json
 import logging
 
-from api.schemas import FiltersSchema
+from api.schemas import FiltersSchema, LimitsResponse, LimitItem
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Глобальное состояние парсера
-STATE = {"running": False, "error": None}
+STATE = {
+    "running": False, 
+    "error": None,
+    "progress": {
+        "current_page": None,
+        "start_page": None,
+        "end_page": None,
+        "channel_index": None,
+        "channels_on_page": None
+    }
+}
+STOP_FLAG = {"should_stop": False}
 
 @router.put("/filters", status_code=204)
 def update_filters(body: FiltersSchema):
@@ -20,7 +31,27 @@ def update_filters(body: FiltersSchema):
         logger.info(f"Получены фильтры для сохранения: {body.dict(exclude_none=True)}")
         
         # Конвертируем в словарь, исключая None значения
-        filters_dict = body.dict(exclude_none=True)
+        incoming = body.dict(exclude_none=True)
+
+        # Нормализуем ключи для build_listing_url
+        filters_dict = {}
+        mapping = {
+            "channel_name": "title",
+            "description": "about",
+            "has_stats": "detailed_bot_added",
+            "male_from": "sex_m_from",
+            "female_from": "sex_w_from",
+        }
+        for k, v in incoming.items():
+            if k == "page":
+                # удаляем page — задается программно
+                continue
+            if k in ("start_page", "end_page"):
+                # сохраняем как есть — используются в парсере, но не передаются в URL
+                filters_dict[k] = v
+                continue
+            key = mapping.get(k, k)
+            filters_dict[key] = v
         
         # Путь к файлу конфигурации
         config_path = Path("telemetr_parser/filters_config.py")
@@ -51,10 +82,32 @@ def start_parse(bg: BackgroundTasks):
         raise HTTPException(status_code=409, detail="Parser already running")
     
     logger.info("Запуск парсера")
-    STATE.update({"running": True, "error": None})
+    STATE.update({
+        "running": True, 
+        "error": None,
+        "progress": {
+            "current_page": None,
+            "start_page": None,
+            "end_page": None,
+            "channel_index": None,
+            "channels_on_page": None
+        }
+    })
+    STOP_FLAG["should_stop"] = False
     bg.add_task(_run)
     
     return {"msg": "started"}
+
+@router.post("/stop", status_code=202)
+def stop_parse():
+    """Остановка парсера"""
+    if not STATE["running"]:
+        raise HTTPException(status_code=409, detail="Parser not running")
+    
+    logger.info("Запрос на остановку парсера")
+    STOP_FLAG["should_stop"] = True
+    
+    return {"msg": "stop requested"}
 
 def _run():
     """Фоновая функция для запуска парсера"""
@@ -87,7 +140,30 @@ def _run():
 @router.get("/status")
 def status():
     """Получение текущего статуса парсера"""
+    # Дополнительно можно вернуть свежие лимиты
     return STATE
+
+
+@router.get("/limits", response_model=LimitsResponse)
+def get_limits():
+    """Возвращает текущие лимиты пользователя, спарсенные из HTML профиля."""
+    try:
+        # Импортируем парсер лимитов
+        from telemetr_parser.config import HEADERS
+        from telemetr_parser.utils import get_limits_from_html
+
+        limits = get_limits_from_html(HEADERS)
+        items = [LimitItem(
+            name=l.name, 
+            description=l.description, 
+            current=l.current, 
+            maximum=l.maximum,
+            severity=l.severity
+        ) for l in limits]
+        return LimitsResponse(items=items)
+    except Exception as e:
+        logger.error(f"Ошибка при получении лимитов: {e}")
+        raise HTTPException(status_code=500, detail=f"Не удалось получить лимиты: {str(e)}")
 
 @router.get("/files-info")
 def files_info():

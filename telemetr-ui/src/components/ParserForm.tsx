@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { Formik, Form, Field } from 'formik'
 import { toast } from 'react-toastify'
-import { putFilters, startParse, getStatus, download, ParseStatus } from '../lib/api'
+import { putFilters, startParse, stopParse, getStatus, download, ParseStatus, getLimits, LimitsResponse } from '../lib/api'
 
 interface FormValues {
   categories: string[]
@@ -22,12 +22,25 @@ interface FormValues {
   male_from: string
   female_from: string
   has_stats: string
+  start_page?: string
+  end_page?: string
 }
 
 const ParserForm: React.FC = () => {
-  const [status, setStatus] = useState<ParseStatus>({ running: false, error: null })
+  const [status, setStatus] = useState<ParseStatus>({ 
+    running: false, 
+    error: null,
+    progress: {
+      current_page: null,
+      start_page: null,
+      end_page: null,
+      channel_index: null,
+      channels_on_page: null
+    }
+  })
   const [polling, setPolling] = useState(false)
   const [completed, setCompleted] = useState(false)
+  const [limits, setLimits] = useState<LimitsResponse | null>(null)
 
   // Список всех категорий
   const allCategories = [
@@ -111,11 +124,23 @@ const ParserForm: React.FC = () => {
     lang_code: '',
     male_from: '',
     female_from: '',
-    has_stats: ''
+    has_stats: '',
+    start_page: '',
+    end_page: ''
   }
 
   // Polling для статуса
   useEffect(() => {
+    // initial fetch limits
+    (async () => {
+      try {
+        const data = await getLimits()
+        setLimits(data)
+      } catch (e) {
+        // ignore, will show nothing
+      }
+    })()
+
     let interval: number
     if (polling) {
       interval = setInterval(async () => {
@@ -129,6 +154,11 @@ const ParserForm: React.FC = () => {
             if (!currentStatus.error) {
               setCompleted(true)
             }
+            // обновляем лимиты по завершении
+            try {
+              const l = await getLimits()
+              setLimits(l)
+            } catch {}
           }
         } catch (error) {
           console.error('Ошибка получения статуса:', error)
@@ -190,20 +220,47 @@ const ParserForm: React.FC = () => {
       if (values.verified && values.verified !== '') filters.verified = values.verified
       if (values.lang_code && values.lang_code !== '') filters.lang_code = values.lang_code
       if (values.has_stats && values.has_stats !== '') filters.has_stats = values.has_stats
+      if (values.start_page && String(values.start_page).trim()) {
+        filters.start_page = parseInt(String(values.start_page))
+      }
+      if (values.end_page && String(values.end_page).trim()) {
+        filters.end_page = parseInt(String(values.end_page))
+      }
 
-      // Отправка фильтров
+      // Отправка фильтров и автозапуск парсера
       await putFilters(filters)
-      
-      // Запуск парсера
       await startParse()
       
       toast.success('Парсер запущен')
-      setStatus({ running: true, error: null })
+      setStatus({ 
+        running: true, 
+        error: null,
+        progress: {
+          current_page: null,
+          start_page: null,
+          end_page: null,
+          channel_index: null,
+          channels_on_page: null
+        }
+      })
       setPolling(true)
+      // обновим лимиты сразу при старте, чтобы видеть актуальные
+      try { setLimits(await getLimits()) } catch {}
       
     } catch (error: any) {
       console.error('Ошибка запуска парсера:', error)
       toast.error(error.message || 'Ошибка запуска парсера')
+      setStatus({ 
+        running: false, 
+        error: error.message || 'Ошибка запуска парсера',
+        progress: {
+          current_page: null,
+          start_page: null,
+          end_page: null,
+          channel_index: null,
+          channels_on_page: null
+        }
+      })
       
       // Показываем детальную информацию об ошибке
       if (error.message.includes('Failed to fetch')) {
@@ -221,6 +278,15 @@ const ParserForm: React.FC = () => {
     }
   }
 
+  const handleStop = async () => {
+    try {
+      await stopParse()
+      toast.info('Запрос на остановку отправлен')
+    } catch (error: any) {
+      toast.error(error.message || 'Ошибка остановки парсера')
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 py-8">
       <div className="max-w-6xl mx-auto px-4">
@@ -232,12 +298,92 @@ const ParserForm: React.FC = () => {
             <p className="text-blue-100 mt-2">Настройте фильтры и запустите парсинг Telegram каналов</p>
           </div>
 
+          {/* Limits Section */}
+          {limits && limits.items && limits.items.length > 0 && (
+            <div className="mx-8 mt-6 mb-2 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <h3 className="text-sm font-semibold text-yellow-900 mb-3">Оставшиеся лимиты на сегодня</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {limits.items.map((l, idx) => {
+                  const remaining = l.current // по условию: текущая цифра — оставшиеся
+                  const ratio = l.maximum > 0 ? remaining / l.maximum : 0
+                  // Цвет зависит от severity и остатка
+                  let color = 'text-green-700'
+                  let borderColor = 'border-yellow-200'
+                  if (l.severity === 'gate') {
+                    // Для gate лимитов более яркая цветовая схема
+                    if (ratio <= 0.1) {
+                      color = 'text-red-700'
+                      borderColor = 'border-red-300'
+                    } else if (ratio <= 0.3) {
+                      color = 'text-orange-600'
+                      borderColor = 'border-orange-300'  
+                    } else {
+                      color = 'text-green-700'
+                      borderColor = 'border-green-300'
+                    }
+                  } else {
+                    // Для warn лимитов более мягкие цвета
+                    if (ratio <= 0.1) {
+                      color = 'text-red-600'
+                    } else if (ratio <= 0.3) {
+                      color = 'text-yellow-600'
+                    } else {
+                      color = 'text-green-600'
+                    }
+                  }
+                  
+                  return (
+                    <div key={idx} className={`flex items-center justify-between bg-white rounded-md border ${borderColor} p-3`}>
+                      <div className="text-gray-700 text-sm">
+                        <div className="font-medium flex items-center gap-2">
+                          {l.name || 'Лимит'}
+                          {l.severity === 'gate' && (
+                            <span className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">
+                              критичный
+                            </span>
+                          )}
+                        </div>
+                        {l.description && <div className="text-gray-500 text-xs">{l.description}</div>}
+                      </div>
+                      <div className={`text-sm font-semibold ${color}`}>
+                        {remaining} / {l.maximum}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Status Messages */}
           {status.running && (
             <div className="bg-blue-50 border-l-4 border-blue-400 p-4 mx-8 mt-6 rounded-r-lg">
-              <div className="flex items-center">
-                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
-                <p className="text-blue-800 font-medium">Парсинг выполняется... Ожидайте завершения</p>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
+                  <div>
+                    <p className="text-blue-800 font-medium">Парсинг выполняется...</p>
+                    {status.progress && (
+                      <div className="text-blue-700 text-sm mt-1">
+                        {status.progress.current_page && (
+                          <span>
+                            Страница {status.progress.current_page}
+                            {status.progress.end_page && ` из ${status.progress.end_page}`}
+                            {status.progress.channel_index && status.progress.channels_on_page && (
+                              `, канал ${status.progress.channel_index}/${status.progress.channels_on_page}`
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={handleStop}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors duration-200 text-sm font-medium"
+                >
+                  Остановить
+                </button>
               </div>
             </div>
           )}
@@ -247,6 +393,8 @@ const ParserForm: React.FC = () => {
               <p className="text-red-800 font-medium">Ошибка: {status.error}</p>
             </div>
           )}
+
+          {/* Completed but with warning-like message could be shown via toast on submit errors; keep section minimal */}
 
           {completed && !status.running && !status.error && (
             <div className="bg-green-50 border-l-4 border-green-400 p-4 mx-8 mt-6 rounded-r-lg">
@@ -513,6 +661,37 @@ const ParserForm: React.FC = () => {
                         <option value="">Не важно</option>
                         <option value="es">Подключено</option>
                       </Field>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Page Range */}
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 mb-4 pb-2 border-b border-gray-200">
+                    Диапазон страниц
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label className="block text-xs text-gray-500 uppercase font-semibold mb-2">
+                        Начать с страницы
+                      </label>
+                      <Field
+                        type="number"
+                        name="start_page"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm appearance-none"
+                        placeholder="От"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 uppercase font-semibold mb-2">
+                        Закончить на странице
+                      </label>
+                      <Field
+                        type="number"
+                        name="end_page"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm appearance-none"
+                        placeholder="До"
+                      />
                     </div>
                   </div>
                 </div>

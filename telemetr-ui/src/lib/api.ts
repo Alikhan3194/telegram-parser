@@ -32,6 +32,19 @@ export const startParse = async () => {
   return response.json()
 }
 
+export const stopParse = async () => {
+  const response = await fetch(`${API}/stop`, {
+    method: "POST"
+  })
+  
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`Ошибка при остановке парсера: ${response.status} ${errorText}`)
+  }
+  
+  return response.json()
+}
+
 export const getStatus = async () => {
   const response = await fetch(`${API}/status`)
   
@@ -47,7 +60,36 @@ export const download = (kind: "excel" | "json") => {
 }
 
 // Type definitions for API responses
+export interface ParseProgress {
+  current_page: number | null
+  start_page: number | null
+  end_page: number | null
+  channel_index: number | null
+  channels_on_page: number | null
+}
+
 export interface ParseStatus {
   running: boolean
   error: string | null
+  progress: ParseProgress
 } 
+
+export interface LimitItem {
+  name: string
+  description: string
+  current: number
+  maximum: number
+  severity: string
+}
+
+export interface LimitsResponse {
+  items: LimitItem[]
+}
+
+export const getLimits = async (): Promise<LimitsResponse> => {
+  const response = await fetch(`${API}/limits`)
+  if (!response.ok) {
+    throw new Error(`Ошибка при получении лимитов: ${response.status}`)
+  }
+  return response.json()
+}

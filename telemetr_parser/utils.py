@@ -2,13 +2,16 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote, urlencode
+from dataclasses import dataclass
+import re
+from typing import List, Optional
 
 try:
     # Попытка относительного импорта (когда запускаем из telemetr_parser/)
-    from config import BASE_URL
+    from config import BASE_URL, LIMITS_URL
 except ImportError:
     # Абсолютный импорт (когда запускаем из корня проекта)
-    from telemetr_parser.config import BASE_URL
+    from telemetr_parser.config import BASE_URL, LIMITS_URL
 
 
 def build_listing_url(
@@ -45,10 +48,21 @@ def build_listing_url(
     else:
         base = "https://telemetr.me/channels/"
 
+    # Устанавливаем обязательные параметры по умолчанию
     params = {
+        # Обязательные
+        "order_column":       order_column or "participants_count",
+        "order_direction":    order_direction or "DESC",
+        "lang_ru":            1 if lang_ru is None else lang_ru,
+        "lang_uz":            0 if lang_uz is None else lang_uz,
+        "channel_type":       channel_type or "all",
+        "moderate":           moderate or "all",
+        "verified":           verified or "all",
+        "detailed_bot_added": detailed_bot_added or "all",
+        # Остальные фильтры
         "links":              "\r\n".join(links) if links else None,
         "title":              title,
-        "about":              about,                  #
+        "about":              about,
         "participants_from":  participants_from,
         "participants_to":    participants_to,
         "views_post_from":    views_post_from,
@@ -57,18 +71,11 @@ def build_listing_url(
         "er_to":              er_to,
         "mentions_week_from": mentions_week_from,
         "mentions_week_to":   mentions_week_to,
-        "order_column":       order_column,
-        "order_direction":    order_direction,
-        "page":               page,
-        "channel_type":       channel_type,
-        "moderate":           moderate,
-        "verified":           verified,
         "sex_m_from":         sex_m_from,
         "sex_w_from":         sex_w_from,
         "lang_code":          lang_code,
-        "lang_ru":            lang_ru,
-        "lang_uz":            lang_uz,
-        "detailed_bot_added": detailed_bot_added,
+        # Пагинация
+        "page":               page,
     }
 
     clean = {k: v for k, v in params.items() if v not in (None, "")}
@@ -76,7 +83,9 @@ def build_listing_url(
 
 
 def fetch_listing(url, headers):
-    r = requests.get(url, headers=headers)
+    """Простой GET: URL уже содержит все параметры (включая page).
+    Ничего не дописывает к URL."""
+    r = requests.get(url, headers=headers, timeout=20)
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
 
@@ -95,7 +104,7 @@ def extract_all_usernames(soup):
     return result
 
 
-def parse_channel(username, headers):
+def parse_channel_html(username, headers):
     # Если приватный канал через joinchat/, то URL = BASE_URL/joinchat/…
     if username.startswith("joinchat/"):
         url = f"{BASE_URL}/{username}"
@@ -141,3 +150,163 @@ def parse_channel(username, headers):
         "description": desc_lines,
         "admins":      admins or None
     } 
+
+
+def _split_description_lines(text: str) -> List[str]:
+    if not text:
+        return []
+    # Разделители: перенос строки, маркеры, вертикальные черты
+    raw = [p.strip() for p in re.split(r"[\n\r\u2022\-\•\|]+", text) if p.strip()]
+    return raw
+
+
+def _extract_links(line: str) -> List[str]:
+    urls = re.findall(r"https?://\S+", line)
+    tme = re.findall(r"t\.me/\S+", line)
+    return urls + tme
+
+
+def _extract_handles(line: str) -> List[str]:
+    return re.findall(r"@[A-Za-z0-9_]+", line)
+
+
+def parse_channel_api(username_or_joinchat: str) -> dict:
+    """Детальная карточка канала через официальный API.
+    Fallback на HTML реализуется в вызывающем коде.
+    """
+    from .telemetr_api import get_channel_info, get_channel_subscribers
+    # Нормализуем идентификатор
+    cid = username_or_joinchat.strip()
+    if not cid.startswith("joinchat/"):
+        cid = cid.lstrip("@")
+        cid = f"@{cid}" if not cid.startswith("@") else cid
+
+    info = get_channel_info(cid)
+    title = info.get("title") or info.get("name") or ""
+    tg_link = info.get("link") or ""
+    tg_username = info.get("username") or ("@" + (tg_link.rsplit("/", 1)[-1] if tg_link else ""))
+
+    # Подписчики: берем participants_count, иначе добираем через /subscribers
+    subscribers = info.get("participants_count")
+    if not subscribers:
+        try:
+            subscribers = get_channel_subscribers(cid) or "N/A"
+        except Exception:
+            subscribers = "N/A"
+
+    about_text = info.get("about") or ""
+    lines = _split_description_lines(about_text)
+    desc_lines: List[tuple[str, Optional[str]]] = []
+    admins: List[tuple[str, Optional[str]]] = []
+
+    for line in lines:
+        links = _extract_links(line)
+        first_link = links[0] if links else None
+        desc_lines.append((line, first_link))
+        low = line.lower()
+        if any(k in low for k in ("админ", "администратор", "менеджер", "реклама", "реклам", "manager", "admin", "ads")):
+            # собираем упоминания и ссылки как админов
+            handles = _extract_handles(line)
+            if handles:
+                for h in handles:
+                    admins.append((h, None))
+            elif first_link:
+                admins.append((line, first_link))
+
+    return {
+        "title":       title,
+        "tg_link":     tg_link,
+        "tg_username": tg_username,
+        "subscribers": subscribers,
+        "description": desc_lines,
+        "admins":      admins or None,
+    }
+
+
+@dataclass
+class TelemetrLimit:
+    name: str
+    description: str
+    current: int
+    maximum: int
+    severity: str = "warn"  # "gate" or "warn"
+
+
+# Определяем какой лимит является критическим (gate)
+GATE_LIMIT_NAME = "Лимит каналов"
+
+
+def get_limits_from_html(headers) -> List[TelemetrLimit]:
+    """Парсит профиль пользователя на telemetr.me и извлекает лимиты.
+
+    Ищет блоки включая:
+    - Лимит каналов (для ежедневного анализа) 
+    - Количество аккаунтов
+    - Количество устройств  
+    - Запросов в API
+    - Страниц в каталоге
+    - Упоминания
+
+    Ожидаем блоки вида:
+      <div class="mb-3">
+        <div class="float-right col-3">
+          <div class="nowrap"><b>196</b> / 200</div>
+        </div>
+        <div class="sub-text">для ежедневного анализа</div>
+      </div>
+
+    Возвращает список TelemetrLimit с severity.
+    """
+    resp = requests.get(LIMITS_URL, headers=headers)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    limits: List[TelemetrLimit] = []
+    for box in soup.select("div.mb-3"):
+        desc_node = box.select_one("div.sub-text")
+        value_node = box.select_one("div.float-right.col-3 div.nowrap")
+        # Определяем название лимита — div без класса (или первый div, не относящийся к sub-text/float-right)
+        name = None
+        for child in box.find_all("div", recursive=False):
+            classes = child.get("class", [])
+            if "sub-text" in classes:
+                continue
+            if "float-right" in classes and "col-3" in classes:
+                continue
+            name = child.get_text(strip=True)
+            if name:
+                break
+
+        if not value_node:
+            continue
+        desc = desc_node.get_text(strip=True) if desc_node else ""
+        text = value_node.get_text(" ", strip=True)
+        # Ожидаемый формат: "196 / 200" или "196/200"
+        parts = text.replace(" ", "").split("/")
+        if len(parts) != 2:
+            continue
+        try:
+            current = int(parts[0].replace("\xa0", ""))
+            maximum = int(parts[1].replace("\xa0", ""))
+        except ValueError:
+            continue
+        
+        # Определяем severity на основе имени лимита
+        severity = "gate" if name == GATE_LIMIT_NAME else "warn"
+        
+        limits.append(TelemetrLimit(
+            name=name or "", 
+            description=desc, 
+            current=current, 
+            maximum=maximum,
+            severity=severity
+        ))
+
+    return limits
+
+
+def get_limits_from_api(headers) -> List[TelemetrLimit]:
+    """Заглушка для будущей интеграции официального API Telemetr.
+    Оставляем совместимый интерфейс с get_limits_from_html.
+    """
+    raise NotImplementedError("Telemetr official API integration not implemented yet")

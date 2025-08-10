@@ -38,6 +38,20 @@ class FiltersSchema(BaseModel):
     
     # Служебные
     page: Optional[int] = Field(1, ge=1, description="Номер страницы для парсинга")
+    start_page: Optional[int] = Field(None, ge=1, description="Начинать с этой страницы каталога")
+    end_page: Optional[int] = Field(None, ge=1, description="Закончить на этой странице каталога (включительно)")
     
     class Config:
         extra = "forbid"  # Запрещаем дополнительные поля 
+
+
+class LimitItem(BaseModel):
+    name: str
+    description: str
+    current: int
+    maximum: int
+    severity: str = "warn"  # "gate" or "warn"
+
+
+class LimitsResponse(BaseModel):
+    items: List[LimitItem]
