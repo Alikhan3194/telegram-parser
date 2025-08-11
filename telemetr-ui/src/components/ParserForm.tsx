@@ -282,6 +282,23 @@ const ParserForm: React.FC = () => {
     try {
       await stopParse()
       toast.info('Запрос на остановку отправлен')
+      
+      // Немедленно обновляем локальный статус для отзывчивого UI
+      setStatus(prevStatus => ({
+        ...prevStatus,
+        running: false,
+        error: "Остановлено пользователем"
+      }))
+      
+      // Останавливаем поллинг
+      setPolling(false)
+      
+      // Обновляем лимиты после остановки
+      try {
+        const updatedLimits = await getLimits()
+        setLimits(updatedLimits)
+      } catch {}
+      
     } catch (error: any) {
       toast.error(error.message || 'Ошибка остановки парсера')
     }
@@ -305,43 +322,17 @@ const ParserForm: React.FC = () => {
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {limits.items.map((l, idx) => {
                   const remaining = l.current // по условию: текущая цифра — оставшиеся
-                  const ratio = l.maximum > 0 ? remaining / l.maximum : 0
-                  // Цвет зависит от severity и остатка
-                  let color = 'text-green-700'
-                  let borderColor = 'border-yellow-200'
-                  if (l.severity === 'gate') {
-                    // Для gate лимитов более яркая цветовая схема
-                    if (ratio <= 0.1) {
-                      color = 'text-red-700'
-                      borderColor = 'border-red-300'
-                    } else if (ratio <= 0.3) {
-                      color = 'text-orange-600'
-                      borderColor = 'border-orange-300'  
-                    } else {
-                      color = 'text-green-700'
-                      borderColor = 'border-green-300'
-                    }
-                  } else {
-                    // Для warn лимитов более мягкие цвета
-                    if (ratio <= 0.1) {
-                      color = 'text-red-600'
-                    } else if (ratio <= 0.3) {
-                      color = 'text-yellow-600'
-                    } else {
-                      color = 'text-green-600'
-                    }
-                  }
+                  
+                  // Убираем специальное оформление для gate лимитов
+                  // Все лимиты отображаются одинаково - простой счетчик без статуса
+                  const color = 'text-gray-700'
+                  const borderColor = 'border-yellow-200'
                   
                   return (
                     <div key={idx} className={`flex items-center justify-between bg-white rounded-md border ${borderColor} p-3`}>
                       <div className="text-gray-700 text-sm">
-                        <div className="font-medium flex items-center gap-2">
+                        <div className="font-medium">
                           {l.name || 'Лимит'}
-                          {l.severity === 'gate' && (
-                            <span className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">
-                              критичный
-                            </span>
-                          )}
                         </div>
                         {l.description && <div className="text-gray-500 text-xs">{l.description}</div>}
                       </div>

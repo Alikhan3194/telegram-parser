@@ -127,14 +127,25 @@ def _run():
         # Запускаем парсинг
         result = parse_all_channels()
         
-        logger.info(f"Парсинг завершен успешно. Обработано {len(result) if result else 0} каналов")
+        # Проверяем причину завершения
+        if STOP_FLAG.get("should_stop", False):
+            logger.info("Парсинг остановлен пользователем")
+            STATE["error"] = "Остановлено пользователем"
+        else:
+            logger.info(f"Парсинг завершен успешно. Обработано {len(result) if result else 0} каналов")
         
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Ошибка при выполнении парсинга: {error_msg}")
-        STATE["error"] = error_msg
+        # Если это остановка пользователем, не считаем это ошибкой
+        if "Остановлено пользователем" in error_msg:
+            STATE["error"] = "Остановлено пользователем"
+        else:
+            STATE["error"] = error_msg
     finally:
         STATE["running"] = False
+        # Сбрасываем флаг остановки
+        STOP_FLAG["should_stop"] = False
         logger.info("Парсер остановлен")
 
 @router.get("/status")

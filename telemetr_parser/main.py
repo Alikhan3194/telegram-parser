@@ -148,10 +148,10 @@ def parse_all_channels():
             try:
                 url = build_listing_url(**current_filters, page=page_number)
                 logging.info(f"Запрашиваем страницу {page_number}: {url}")
-
+                
                 soup = fetch_listing(url, HEADERS)
-                usernames = extract_all_usernames(soup)
-
+                usernames = extract_all_usernames(soup)  
+                
                 if not usernames:
                     logging.info(f"На странице {page_number} не найдено каналов.")
                     return False
@@ -181,8 +181,11 @@ def parse_all_channels():
                             from api.routers.telemetr import STOP_FLAG
                             if STOP_FLAG.get("should_stop", False):
                                 logging.info("Получен сигнал остановки пользователем")
-                                return False
-                    except Exception:
+                                # Немедленно прерываем обработку
+                                raise Exception("Остановлено пользователем")
+                    except Exception as e:
+                        if "Остановлено пользователем" in str(e):
+                            raise
                         pass
                     
                     # Обновляем прогресс - текущий канал
@@ -203,7 +206,7 @@ def parse_all_channels():
                         results.append(data)
                         channels_processed += 1
                         processed_usernames.add(uname)
-
+                        
                         print("-"*40)
                         print(f"[{channels_processed}] Название: ", data["title"])
                         print("TG ссылка:  ", data["tg_link"])
@@ -218,7 +221,7 @@ def parse_all_channels():
                                 print()
                         print("Админы:     ", data["admins"])
                         print()
-
+                        
                     except Exception as e:
                         error_msg = f"Ошибка при обработке канала {uname}: {e}"
                         logging.error(error_msg)
@@ -229,9 +232,9 @@ def parse_all_channels():
                 if len(usernames) < 30:
                     logging.info(f"Последняя страница {page_number} содержала {len(usernames)} каналов")
                     return False
-
+                    
                 return True
-
+                
             except Exception as e:
                 error_msg = f"Ошибка при обработке страницы {page_number}: {e}"
                 logging.error(error_msg)
@@ -250,8 +253,11 @@ def parse_all_channels():
                             from api.routers.telemetr import STOP_FLAG
                             if STOP_FLAG.get("should_stop", False):
                                 stop_reason = "Остановлено пользователем"
-                                break
-                    except Exception:
+                                raise Exception("Остановлено пользователем")
+                    except Exception as e:
+                        if "Остановлено пользователем" in str(e):
+                            stop_reason = "Остановлено пользователем"
+                            break
                         pass
                     
                     # Проверяем ТОЛЬКО gate лимиты перед обработкой страницы
@@ -271,9 +277,15 @@ def parse_all_channels():
                             break
                         logging.warning(f"Не удалось проверить лимиты перед страницей {p}: {e}")
                     
-                    should_continue = process_single_page(p)
-                    if not should_continue:
-                        break
+                    try:
+                        should_continue = process_single_page(p)
+                        if not should_continue:
+                            break
+                    except Exception as e:
+                        if "Остановлено пользователем" in str(e):
+                            stop_reason = "Остановлено пользователем"
+                            break
+                        raise
             else:
                 # Иначе — продолжаем до конца
                 current_page = start_page
@@ -284,8 +296,11 @@ def parse_all_channels():
                             from api.routers.telemetr import STOP_FLAG
                             if STOP_FLAG.get("should_stop", False):
                                 stop_reason = "Остановлено пользователем"
-                                break
-                    except Exception:
+                                raise Exception("Остановлено пользователем")
+                    except Exception as e:
+                        if "Остановлено пользователем" in str(e):
+                            stop_reason = "Остановлено пользователем"
+                            break
                         pass
                     
                     # Проверяем ТОЛЬКО gate лимиты перед обработкой страницы
@@ -305,12 +320,18 @@ def parse_all_channels():
                             break
                         logging.warning(f"Не удалось проверить лимиты перед страницей {current_page}: {e}")
                     
-                    should_continue = process_single_page(current_page)
-                    if not should_continue:
-                        break
-                    current_page += 1
+                    try:
+                        should_continue = process_single_page(current_page)
+                        if not should_continue:
+                            break
+                        current_page += 1
+                    except Exception as e:
+                        if "Остановлено пользователем" in str(e):
+                            stop_reason = "Остановлено пользователем"
+                            break
+                        raise
         except Exception as e:
-            if "⛔" in str(e) or "Достигнут лимит" in str(e):
+            if "⛔" in str(e) or "Достигнут лимит" in str(e) or "Остановлено пользователем" in str(e):
                 stop_reason = str(e)
             else:
                 raise
@@ -330,32 +351,32 @@ def parse_all_channels():
         
         # Сохранение файлов (даже если была остановка по лимитам)
         if results:
-            json_path = data_dir / "telemetr_results.json"
-            excel_path = data_dir / "telemetr_results.xlsx"
+        json_path = data_dir / "telemetr_results.json"
+        excel_path = data_dir / "telemetr_results.xlsx"
             _save_processed_usernames(processed_file, processed_usernames)
-            
-            # Сохраняем JSON
-            try:
-                with open(json_path, "w", encoding="utf-8") as f:
-                    json.dump(results, f, ensure_ascii=False, indent=2)
-                logging.info(f"JSON файл сохранен: {json_path}")
-            except Exception as e:
+        
+        # Сохраняем JSON
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+            logging.info(f"JSON файл сохранен: {json_path}")
+        except Exception as e:
                 logging.error(f"Ошибка при сохранении JSON файла: {e}")
 
-            # Сохраняем Excel
-            try:
-                df = pd.DataFrame(results)
-                df.to_excel(excel_path, index=False)
-                logging.info(f"Excel файл сохранен: {excel_path}")
-            except Exception as e:
+        # Сохраняем Excel
+        try:
+            df = pd.DataFrame(results)
+            df.to_excel(excel_path, index=False)
+            logging.info(f"Excel файл сохранен: {excel_path}")
+        except Exception as e:
                 logging.error(f"Ошибка при сохранении Excel файла: {e}")
             
             # Выводим информацию о сохраненных файлах
             if json_path.exists() and excel_path.exists():
-                print(f"\n✅ Результаты сохранены:")
-                print(f"- JSON: {json_path} ({json_path.stat().st_size} байт)")
-                print(f"- Excel: {excel_path} ({excel_path.stat().st_size} байт)")
-                print(f"- Всего каналов: {len(results)}")
+        print(f"\n✅ Результаты сохранены:")
+        print(f"- JSON: {json_path} ({json_path.stat().st_size} байт)")
+        print(f"- Excel: {excel_path} ({excel_path.stat().st_size} байт)")
+        print(f"- Всего каналов: {len(results)}")
             
         # Сбрасываем STOP_FLAG после завершения работы
         try:
