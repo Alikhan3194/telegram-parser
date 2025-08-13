@@ -1,7 +1,7 @@
 import logging
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from dataclasses import dataclass
 import re
 from typing import List, Optional
@@ -12,6 +12,82 @@ try:
 except ImportError:
     # Абсолютный импорт (когда запускаем из корня проекта)
     from telemetr_parser.config import BASE_URL, LIMITS_URL
+
+
+# Регулярные выражения для извлечения админов
+ADMIN_KEYWORDS_RE = re.compile(
+    r"(?:\badmin\b|\badministrator\b|\bmanager\b|\bcontact\b|\badvert\b|\bpromo\b|"
+    r"\bреклам[аеи]\b|\bменеджер\b|\bменеджмент\b|\bсвязь\b|\bконтакт[ы]?\b|\bадмин\b)",
+    flags=re.IGNORECASE
+)
+
+HANDLE_RE = re.compile(r"@([A-Za-z0-9_]{4,})")
+TME_LINK_RE = re.compile(r"https?://t\.me/(?:joinchat/)?[A-Za-z0-9_/\-]+", flags=re.IGNORECASE)
+
+
+def _normalize_handle_to_link(handle: str) -> str:
+    """Конвертирует @handle в полную t.me ссылку."""
+    handle = handle.lstrip("@").strip()
+    return f"https://t.me/{handle}"
+
+
+def _try_handle_from_link(link: str) -> str | None:
+    """Пытается извлечь username из t.me ссылки."""
+    try:
+        p = urlparse(link)
+        # /username или /joinchat/<code> или /s/<username>/...
+        parts = [x for x in p.path.split("/") if x]
+        if not parts:
+            return None
+        # Пробуем вытащить «обычный» username
+        if parts[0].lower() in ("joinchat", "s"):
+            # joinchat/s — username может идти дальше, но зачастую это инвайт/код; возвращаем None
+            return None
+        return parts[0]
+    except Exception:
+        return None
+
+
+def extract_admins_from_text(about: str) -> list[tuple[str, str]]:
+    """
+    Извлекает админов по строкам описания. Ищет строки, где есть ADMIN_KEYWORDS_RE.
+    В такой строке:
+      — собирает все t.me ссылки;
+      — собирает все @handles;
+      — для @handle строит полноценную ссылку;
+      — для t.me пытается извлечь handle; если не получается, в качестве «handle_or_label»
+        кладём 't.me' или короткий текст без мусора.
+    Возвращает список кортежей (handle_or_label, url). Дубликаты по url удаляются.
+    """
+    if not about:
+        return []
+
+    results: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+
+    # Нормализуем переносы/неразрывные пробелы/эмодзи не мешают
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in about.splitlines() if ln.strip()]
+    for ln in lines:
+        if not ADMIN_KEYWORDS_RE.search(ln):
+            continue
+
+        # 1) t.me-ссылки
+        for link in TME_LINK_RE.findall(ln):
+            url = link.strip()
+            if url not in seen_urls:
+                handle = _try_handle_from_link(url)
+                handle_or_label = f"@{handle}" if handle else "t.me"
+                results.append((handle_or_label, url))
+                seen_urls.add(url)
+
+        # 2) @handles
+        for h in HANDLE_RE.findall(ln):
+            url = _normalize_handle_to_link(h)
+            if url not in seen_urls:
+                results.append((f"@{h}", url))
+                seen_urls.add(url)
+
+    return results
 
 
 def build_listing_url(
@@ -126,8 +202,12 @@ def parse_channel_html(username, headers):
 
     desc_block = soup.select_one("div.kt-widget__desc.t_long")
     desc_lines = []
-    admins     = []
+    about_html_text = ""
     if desc_block:
+        # Собираем весь текст для извлечения админов
+        about_html_text = desc_block.get_text(" ", strip=True)
+        
+        # Для description сохраняем старую логику построчного разбора
         for node in desc_block.children:
             if getattr(node, "name", None) == "br":
                 continue
@@ -135,9 +215,9 @@ def parse_channel_html(username, headers):
             link = node.get("href") if getattr(node, "name", None) == "a" else None
             if text:
                 desc_lines.append((text, link))
-                low = text.lower()
-                if "админ" in low or "менеджер" in low:
-                    admins.append((text, link))
+
+    # Используем новую логику извлечения админов из всего текста описания
+    admins = extract_admins_from_text(about_html_text)
 
     sub_span    = soup.select_one("span.kt-number.kt-font-brand[data-num=participants]")
     subscribers = sub_span.get_text(strip=True) if sub_span else "N/A"
@@ -195,23 +275,17 @@ def parse_channel_api(username_or_joinchat: str) -> dict:
             subscribers = "N/A"
 
     about_text = info.get("about") or ""
+    
+    # Используем новую логику извлечения админов
+    admins = extract_admins_from_text(about_text)
+    
+    # Для description оставляем старую логику для совместимости
     lines = _split_description_lines(about_text)
     desc_lines: List[tuple[str, Optional[str]]] = []
-    admins: List[tuple[str, Optional[str]]] = []
-
     for line in lines:
         links = _extract_links(line)
         first_link = links[0] if links else None
         desc_lines.append((line, first_link))
-        low = line.lower()
-        if any(k in low for k in ("админ", "администратор", "менеджер", "реклама", "реклам", "manager", "admin", "ads")):
-            # собираем упоминания и ссылки как админов
-            handles = _extract_handles(line)
-            if handles:
-                for h in handles:
-                    admins.append((h, None))
-            elif first_link:
-                admins.append((line, first_link))
 
     return {
         "title":       title,

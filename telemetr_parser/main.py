@@ -27,10 +27,10 @@ def get_current_filters():
 
 try:
     from config import HEADERS, BASE_URL
-    from utils import build_listing_url, fetch_listing, extract_all_usernames, parse_channel_html, parse_channel_api, get_limits_from_html
+    from utils import build_listing_url, fetch_listing, extract_all_usernames, parse_channel_html, parse_channel_api, get_limits_from_html, GATE_LIMIT_NAME
 except ImportError:
     from telemetr_parser.config import HEADERS, BASE_URL
-    from telemetr_parser.utils import build_listing_url, fetch_listing, extract_all_usernames, parse_channel_html, parse_channel_api, get_limits_from_html
+    from telemetr_parser.utils import build_listing_url, fetch_listing, extract_all_usernames, parse_channel_html, parse_channel_api, get_limits_from_html, GATE_LIMIT_NAME
 
 logs_dir = Path("../logs")
 logs_dir.mkdir(exist_ok=True)
@@ -45,6 +45,13 @@ else:
     data_dir = Path("data")
 
 data_dir.mkdir(exist_ok=True)
+
+
+def _fmt_admins(adm: list[tuple[str, str]] | None) -> str | None:
+    """Форматирует список админов для Excel в виде читаемой строки."""
+    if not adm:
+        return None
+    return "; ".join(f"{h} {u}" for (h, u) in adm)
 
 
 def _load_processed_usernames(file_path: Path) -> Set[str]:
@@ -99,7 +106,6 @@ def parse_all_channels():
         
         # Проверяем лимиты до старта - ТОЛЬКО gate лимиты могут остановить парсинг
         try:
-            from telemetr_parser.utils import GATE_LIMIT_NAME
             limits = get_limits_from_html(HEADERS)
             for lim in limits:
                 if lim.current <= 0:
@@ -351,32 +357,46 @@ def parse_all_channels():
         
         # Сохранение файлов (даже если была остановка по лимитам)
         if results:
-        json_path = data_dir / "telemetr_results.json"
-        excel_path = data_dir / "telemetr_results.xlsx"
+            json_path = data_dir / "telemetr_results.json"
+            excel_path = data_dir / "telemetr_results.xlsx"
             _save_processed_usernames(processed_file, processed_usernames)
         
-        # Сохраняем JSON
-        try:
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-            logging.info(f"JSON файл сохранен: {json_path}")
-        except Exception as e:
+            # Сохраняем JSON
+            try:
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
+                logging.info(f"JSON файл сохранен: {json_path}")
+            except Exception as e:
                 logging.error(f"Ошибка при сохранении JSON файла: {e}")
 
-        # Сохраняем Excel
-        try:
-            df = pd.DataFrame(results)
-            df.to_excel(excel_path, index=False)
-            logging.info(f"Excel файл сохранен: {excel_path}")
-        except Exception as e:
+            # Сохраняем Excel
+            try:
+                # Преобразуем данные для Excel с правильным форматированием админов
+                excel_data = []
+                for item in results:
+                    row = {
+                        "Название": item.get("title", ""),
+                        "TG ссылка": item.get("tg_link", ""),
+                        "Юзернейм": item.get("tg_username", ""),
+                        "Подписчики": item.get("subscribers", ""),
+                        "Админы": _fmt_admins(item.get("admins")),
+                        # Описание оставляем как раньше для совместимости
+                        "Описание": "; ".join([line[0] for line in item.get("description", []) if line[0]]) if item.get("description") else ""
+                    }
+                    excel_data.append(row)
+                
+                df = pd.DataFrame(excel_data)
+                df.to_excel(excel_path, index=False)
+                logging.info(f"Excel файл сохранен: {excel_path}")
+            except Exception as e:
                 logging.error(f"Ошибка при сохранении Excel файла: {e}")
             
             # Выводим информацию о сохраненных файлах
             if json_path.exists() and excel_path.exists():
-        print(f"\n✅ Результаты сохранены:")
-        print(f"- JSON: {json_path} ({json_path.stat().st_size} байт)")
-        print(f"- Excel: {excel_path} ({excel_path.stat().st_size} байт)")
-        print(f"- Всего каналов: {len(results)}")
+                print(f"\n✅ Результаты сохранены:")
+                print(f"- JSON: {json_path} ({json_path.stat().st_size} байт)")
+                print(f"- Excel: {excel_path} ({excel_path.stat().st_size} байт)")
+                print(f"- Всего каналов: {len(results)}")
             
         # Сбрасываем STOP_FLAG после завершения работы
         try:
